@@ -240,15 +240,19 @@ def save_output(output, content_all):
 # get outputs from database
 def get_outputs():
     try:
-        # Get current user info
-        headers = st.context.headers
-        user_id = headers.get('X-MS-CLIENT-PRINCIPAL-ID', '12345')
-        
+        # --- Basic guards ---
+        if 'outputs_container' not in globals() or outputs_container is None:
+            st.info("no data found")
+            return
+
+        # Get current user info (fall back to anon-ish id if header absent)
+        headers = getattr(st, "context", None).headers if hasattr(st, "context") else {}
+        user_id = (headers or {}).get('X-MS-CLIENT-PRINCIPAL-ID', '12345')
         if not user_id:
             st.warning("User not authenticated")
             return
-            
-        # Query to get all items for current user ordered by updatedAt
+
+        # Query user-scoped items
         query = "SELECT * FROM c WHERE c.user_id = @user_id ORDER BY c.updatedAt DESC"
         parameters = [{"name": "@user_id", "value": user_id}]
         items = list(outputs_container.query_items(
@@ -256,21 +260,45 @@ def get_outputs():
             parameters=parameters,
             enable_cross_partition_query=True
         ))
-        
-        # Keep only the latest 50 items
-        items_to_delete = items[50:]
-        latest_items = items[:50]
-        
-        # Delete older items
+
+        # --- Empty DB / no rows case ---
+        if not items:
+            st.info("no data found")
+            return
+
+        # Keep only the latest 500 items; delete the rest
+        latest_items = items[:500]
+        items_to_delete = items[500:]
         for item in items_to_delete:
-            outputs_container.delete_item(
-                item=item['id']
-            )
-        
-        # Convert to DataFrame and select only specific columns
-        df = pd.DataFrame(latest_items)
-        df = df[['updatedAt', 'styleId', 'content', 'output']]
-        # Display the DataFrame in Streamlit
+            try:
+                outputs_container.delete_item(item=item['id'], partition_key=item.get('user_id'))
+            except exceptions.CosmosHttpResponseError:
+                # Non-fatal: continue deleting others
+                pass
+
+        # Build DF safely even if some fields are missing
+        # Use .get with defaults to avoid KeyError
+        safe_rows = []
+        for it in latest_items:
+            safe_rows.append({
+                'updatedAt': it.get('updatedAt'),
+                'styleId'  : it.get('styleId'),
+                'content'  : it.get('content'),
+                'output'   : it.get('output')
+            })
+
+        df = pd.DataFrame.from_records(safe_rows)
+
+        # If the resulting DF is empty or all-NaN columns, inform the user
+        if df.empty or df.dropna(how="all").empty:
+            st.info("no data found")
+            return
+
         st.dataframe(df)
-    except exceptions.CosmosHttpResponseError as e:
+
+    except (exceptions.CosmosResourceNotFoundError, exceptions.CosmosHttpResponseError) as e:
+        # Container or query error
         st.error(f"An error occurred while fetching outputs: {e}")
+    except Exception as e:
+        # Catch-all so the UI doesn't explode
+        st.error(f"Unexpected error: {e}")
