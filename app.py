@@ -346,6 +346,7 @@ def make_docx_bytes(text: str, title: str | None = None) -> bytes:
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
+    from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
     import re as regex_module
     
     doc = Document()
@@ -357,6 +358,28 @@ def make_docx_bytes(text: str, title: str | None = None) -> bytes:
         section.bottom_margin = Inches(1)
         section.left_margin = Inches(1.25)
         section.right_margin = Inches(1.25)
+    
+    # Helper function to set cell shading
+    def set_cell_shading(cell, color_hex):
+        """Set cell background color"""
+        shading_elm = OxmlElement('w:shd')
+        shading_elm.set(qn('w:fill'), color_hex)
+        cell._element.get_or_add_tcPr().append(shading_elm)
+    
+    # Helper function to set cell borders
+    def set_cell_border(cell, **kwargs):
+        """Set cell borders"""
+        tc = cell._element
+        tcPr = tc.get_or_add_tcPr()
+        tcBorders = OxmlElement('w:tcBorders')
+        for edge in ('top', 'left', 'bottom', 'right'):
+            if edge in kwargs:
+                edge_elem = OxmlElement(f'w:{edge}')
+                edge_elem.set(qn('w:val'), 'single')
+                edge_elem.set(qn('w:sz'), '4')
+                edge_elem.set(qn('w:color'), kwargs[edge])
+                tcBorders.append(edge_elem)
+        tcPr.append(tcBorders)
     
     # === COVER PAGE ===
     # Add BSP Logo if available
@@ -622,38 +645,178 @@ def make_docx_bytes(text: str, title: str | None = None) -> bytes:
     doc.add_heading("CONTENT", level=1)
     doc.add_paragraph()
     
-    # Split into paragraphs and add content with proper formatting
-    for block in text.replace("\r\n", "\n").split("\n\n"):
-        if block.strip():
-            # Check if this is a header/subheader (starts with Roman numerals, numbers, or all caps)
-            stripped_block = block.strip()
-            
-            # Detect headers: Roman numerals (I., II., III., IV.), Numbers (1., 2., 3.), or ALL CAPS lines
-            is_header = False
-            if (regex_module.match(r'^(I{1,3}V?|IV|V|VI{0,3}|IX|X{1,3}|XL|L|LX{0,3}|XC|C{1,3})\.\s+', stripped_block) or
-                regex_module.match(r'^\d+[\.\)]\s+', stripped_block) or
-                (len(stripped_block.split('\n')[0]) < 100 and stripped_block.split('\n')[0].isupper()) or
-                regex_module.match(r'^[A-Z][a-z]+ [A-Z]', stripped_block)):
-                is_header = True
-            
-            p = doc.add_paragraph()
-            p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-            
-            # Split by lines to handle mixed content
-            lines = stripped_block.split('\n')
-            for i, line in enumerate(lines):
-                if line.strip():
-                    run = p.add_run(line.strip())
-                    run.font.size = Pt(11)
+    # Helper function to detect table-like content
+    def is_table_content(lines):
+        """Detect if lines represent a table structure"""
+        if len(lines) < 2:
+            return False
+        non_empty = [line for line in lines if line.strip()]
+        if len(non_empty) < 2:
+            return False
+        # Check for multiple columns indicated by tabs or multiple spaces
+        tab_counts = [line.count('\t') for line in non_empty]
+        space_pattern = [len(regex_module.findall(r'\s{2,}', line)) for line in non_empty]
+        # At least 2 lines must have consistent column separators
+        has_tabs = sum(1 for c in tab_counts if c > 0) >= 2
+        has_spaces = sum(1 for s in space_pattern if s >= 2) >= 2
+        return has_tabs or has_spaces
+    
+    # Helper function to create formatted table
+    def create_assessment_table(lines):
+        """Create a formatted BSP assessment table from lines"""
+        # Parse table structure
+        table_data = []
+        for line in lines:
+            if line.strip():
+                # Split by tab or multiple spaces (2 or more)
+                if '\t' in line:
+                    cells = [cell.strip() for cell in line.split('\t') if cell.strip()]
+                else:
+                    # Split by 2+ spaces, filter empty cells
+                    cells = [cell.strip() for cell in regex_module.split(r'\s{2,}', line) if cell.strip()]
+                if cells:
+                    table_data.append(cells)
+        
+        if not table_data or len(table_data) < 2:
+            return None
+        
+        # Determine number of columns (use most common column count)
+        col_counts = [len(row) for row in table_data]
+        max_cols = max(col_counts)
+        if max_cols == 0 or max_cols == 1:
+            return None
+        
+        # Normalize rows to have consistent column count
+        for row in table_data:
+            while len(row) < max_cols:
+                row.append('')
+        
+        # Create table with proper styling
+        table = doc.add_table(rows=len(table_data), cols=max_cols)
+        table.style = 'Light Grid Accent 1'
+        table.alignment = WD_TABLE_ALIGNMENT.LEFT
+        
+        # Set column widths based on content
+        if max_cols == 2:
+            table.columns[0].width = Inches(4.0)
+            table.columns[1].width = Inches(1.5)
+        elif max_cols == 3:
+            table.columns[0].width = Inches(2.5)
+            table.columns[1].width = Inches(2.0)
+            table.columns[2].width = Inches(1.5)
+        elif max_cols == 4:
+            table.columns[0].width = Inches(2.0)
+            table.columns[1].width = Inches(2.0)
+            table.columns[2].width = Inches(1.0)
+            table.columns[3].width = Inches(1.5)
+        elif max_cols >= 5:
+            for col_idx in range(max_cols):
+                table.columns[col_idx].width = Inches(6.0 / max_cols)
+        
+        # Fill table with data and formatting
+        for i, row_data in enumerate(table_data):
+            row_cells = table.rows[i].cells
+            for j, cell_text in enumerate(row_data):
+                cell = row_cells[j]
+                # Clear default paragraph
+                cell.text = ''
+                p = cell.paragraphs[0]
+                run = p.add_run(cell_text)
+                
+                cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+                
+                # Format first row as header
+                if i == 0:
+                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    run.font.bold = True
+                    run.font.size = Pt(10)
+                    run.font.name = 'Calibri'
+                    # Add gray shading to header
+                    set_cell_shading(cell, 'D9D9D9')
+                else:
+                    # Regular cell formatting
+                    p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                    run.font.size = Pt(10)
                     run.font.name = 'Calibri'
                     
-                    # Make headers bold
-                    if is_header or (len(line.strip()) < 100 and line.strip().isupper()):
+                    # Highlight ratings/assessment values
+                    if any(keyword in cell_text.upper() for keyword in ['STRONG', 'MODERATE', 'LOW', 'ACCEPTABLE', 'WEAK', 'HIGH']):
                         run.font.bold = True
-                    
-                    # Add line break if not last line
-                    if i < len(lines) - 1:
-                        p.add_run('\n')
+                
+                # Remove extra spacing in paragraphs
+                p.space_before = Pt(0)
+                p.space_after = Pt(0)
+        
+        return table
+    
+    # Process content blocks with enhanced formatting
+    current_section = None
+    for block in text.replace("\r\n", "\n").split("\n\n"):
+        if block.strip():
+            stripped_block = block.strip()
+            lines = stripped_block.split('\n')
+            
+            # Check if this is a table structure
+            if is_table_content(lines):
+                table = create_assessment_table(lines)
+                if table:
+                    continue
+            
+            # Detect major section headers
+            is_major_header = False
+            is_minor_header = False
+            
+            # Major headers: Roman numerals or risk assessment titles
+            if (regex_module.match(r'^(I{1,3}V?|IV|V|VI{0,3}|IX|X{1,3}|XL|L|LX{0,3}|XC|C{1,3})\.\s+', stripped_block) or
+                regex_module.match(r'^(Assessment|Directives|Overall|Summary|Scope|Conclusion):', stripped_block, regex_module.IGNORECASE)):
+                is_major_header = True
+                current_section = stripped_block
+            
+            # Minor headers: Numbers or labeled items
+            elif (regex_module.match(r'^\d+[\.\)]\s+', stripped_block) or
+                  (len(lines[0]) < 100 and lines[0].isupper())):
+                is_minor_header = True
+            
+            # Create paragraph with appropriate styling
+            if is_major_header:
+                # Major section header - larger, bold, with spacing
+                p = doc.add_paragraph()
+                p.space_before = Pt(12)
+                p.space_after = Pt(6)
+                run = p.add_run(stripped_block)
+                run.font.size = Pt(12)
+                run.font.bold = True
+                run.font.name = 'Calibri'
+            elif is_minor_header:
+                # Minor section header - bold, normal size
+                p = doc.add_paragraph()
+                p.space_before = Pt(6)
+                p.space_after = Pt(3)
+                run = p.add_run(stripped_block)
+                run.font.size = Pt(11)
+                run.font.bold = True
+                run.font.name = 'Calibri'
+            else:
+                # Regular content paragraph
+                p = doc.add_paragraph()
+                p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+                
+                # Handle multi-line content
+                for i, line in enumerate(lines):
+                    if line.strip():
+                        # Check if line itself is a header
+                        line_is_header = (len(line.strip()) < 100 and line.strip().isupper())
+                        
+                        run = p.add_run(line.strip())
+                        run.font.size = Pt(11)
+                        run.font.name = 'Calibri'
+                        
+                        if line_is_header:
+                            run.font.bold = True
+                        
+                        # Add line break if not last line
+                        if i < len(lines) - 1:
+                            p.add_run('\n')
     
     bio = BytesIO()
     doc.save(bio)
@@ -1049,14 +1212,11 @@ def make_pdf_bytes(text: str, title: str | None = None) -> bytes:
 if st.button(
     ":blue[**Rewrite Content**]",
     key="extract",
-   # disabled=content_all == ""
     disabled=(
-    content_all.strip() == ""
-    or st.session_state.style == ""
-    or st.session_state.example == ""
-)
-    or st.session_state.style == ""
-    or st.session_state.example == "",
+        content_all.strip() == ""
+        or st.session_state.style == ""
+        or st.session_state.example == ""
+    ),
 ):
     with st.spinner("Processing..."):
         # --- Process and store the result ---
@@ -1071,8 +1231,9 @@ if st.button(
         st.session_state["last_base_name"] = base_name
         st.session_state["last_title"] = f"Rewrite • {st.session_state.get('styleId') or 'Selected Style'}"
         st.session_state["output_ready"] = True
+        st.rerun()
 
-# Display output and download buttons if available
+# Display output and download buttons if available (only once)
 if st.session_state.get("output_ready") and st.session_state.get("last_output"):
     with st.container(border=True):
         st.markdown("### ✨ Rewritten Output")
