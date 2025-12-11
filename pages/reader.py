@@ -208,12 +208,10 @@ st.session_state.styleName = st.text_input(
 if st.button(
     ":blue[**Extract Writing Style**]",
     key="extract",
-   # disabled=combined_text.strip() == "" or st.session_state.styleName == "",
     disabled=(
-    combined_text.strip() == ""
-    or st.session_state.styleName == ""
-    #or st.session_state.content == ""
-)
+        combined_text.strip() == ""
+        or st.session_state.styleName == ""
+    ),
 ):
     with st.spinner("Processing..."):
         # Check if style name already exists
@@ -227,8 +225,9 @@ if st.button(
             st.session_state["extracted_style_name"] = st.session_state.styleName
             st.session_state["extraction_success"] = True
             st.session_state["extraction_error"] = None
+        st.rerun()
 
-# Display extraction results persistently
+# Display extraction results persistently (only once)
 if st.session_state.get("extraction_success"):
     with st.container(border=True):
         st.success(f"✅ Style '{st.session_state.get('extracted_style_name')}' extracted and saved successfully!")
